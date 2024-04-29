@@ -11,22 +11,18 @@ import pstats
 import io
 import pickle
 import argparse
+import numpy as np
+import matplotlib.pyplot as plt
+import imagehash
+import cv2
 from copy import deepcopy
 from itertools import product
 from dataclasses import dataclass
-
-import numpy as np
-import matplotlib.pyplot as plt
-
 from shapely.geometry import LineString
 from shapely.geometry.polygon import Polygon
 from shapely.affinity import scale
 from scipy.ndimage import rotate
 from PIL import Image as PILImage
-
-import imagehash
-import cv2
-
 
 def order_polygon_points(x, y):
     """
@@ -452,9 +448,13 @@ class TestImage:
         self.phash = None
         self.visual = False
         self.histogram_adjust()
-        # self.calculate_phash()
 
+    def __init__(self, frame, clahe):
+        self.original = frame
+        self.clahe = clahe
+        self.adjusted = None
         self.candidate_list = []
+        self.histogram_adjust()
 
     def histogram_adjust(self):
         """
@@ -643,11 +643,14 @@ class MagicCardDetector:
             self.reference_images.append(
                 ReferenceImage(img_name, img, self.clahe))
         print('Done.')
-
-    def read_and_adjust_test_images(self, path):
-        """
+    def read_and_adjust_test_image(self, frame):
+        # Assuming frame is already resized and adjusted if needed
+        return TestImage(frame, self.clahe)
+    
+    """def read_and_adjust_test_images(self, path):
+        \"""
         Reads and histogram-adjusts the test image set.
-        """
+        \"""
         maxsize = 1000
         print('Reading images from ' + str(path))
         print('...', end=' ')
@@ -665,6 +668,7 @@ class MagicCardDetector:
             self.test_images.append(
                 TestImage(img_name, img, self.clahe))
         print('Done.')
+        """
 
     def contour_image_gray(self, full_image, thresholding='adaptive'):
         """
@@ -931,60 +935,46 @@ def main():
     """
 
     # Add command line parser
-    parser = argparse.ArgumentParser(
-        description='Recognize Magic: the Gathering cards from an image. ' +
-                     'Author: Timo Ikonen, timo.ikonen(at)iki.fi')
-
-    parser.add_argument('input_path',
-                        help='path containing the images to be analyzed')
-    parser.add_argument('output_path',
-                        help='output path for the results')
-    parser.add_argument('--phash', default='alpha_reference_phash.dat',
-                        help='pre-calculated phash reference file')
-    parser.add_argument('--visual', default=False, action='store_true',
-                        help='run with visualization')
-    parser.add_argument('--verbose', default=False, action='store_true',
-                        help='run in verbose mode')
-
+    parser = argparse.ArgumentParser(description='Real-time MTG Card Detector')
+    parser.add_argument('--visual', action='store_true', help='Run with visualization')
     args = parser.parse_args()
 
-    # Create the output path
-    output_path = args.output_path.rstrip('/')
-    if not os.path.exists(output_path):
-        os.mkdir(output_path)
+    # Initialize camera
+    cap = cv2.VideoCapture(0)  # Adjust the camera index if needed
+    if not cap.isOpened():
+        print("Error: Camera could not be opened.")
+        return
 
-    # Instantiate the detector
-    card_detector = MagicCardDetector(output_path)
+    # Initialize card detector
+    card_detector = MagicCardDetector(output_path='')
+    card_detector.verbose = args.visual  # Set visual mode based on command line argument
 
-    do_profile = False
-    card_detector.visual = args.visual
-    card_detector.verbose = args.verbose
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("Error: Can't receive frame (stream end?). Exiting ...")
+                break
 
-    # Read the reference and test data sets
-    # card_detector.read_and_adjust_reference_images(
-    #     '../../MTG/Card_Images/LEA/')
-    card_detector.read_prehashed_reference_data(args.phash)
-    card_detector.read_and_adjust_test_images(args.input_path)
+            # Process each frame
+            test_image = card_detector.read_and_adjust_test_image(frame)
+            card_detector.recognize_cards_in_image(test_image, contouring_mode='adaptive')
 
-    if do_profile:
-        # Start up the profiler.
-        profiler = cProfile.Profile()
-        profiler.enable()
+            # Display results
+            if args.visual:
+                for candidate in test_image.candidate_list:
+                    if candidate.is_recognized:
+                        cv2.rectangle(frame, (int(candidate.bounding_quad.bounds[0]), int(candidate.bounding_quad.bounds[1])),
+                                      (int(candidate.bounding_quad.bounds[2]), int(candidate.bounding_quad.bounds[3])), (0, 255, 0), 2)
+                        cv2.putText(frame, candidate.name, (int(candidate.bounding_quad.bounds[0]), int(candidate.bounding_quad.bounds[1] - 10)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36,255,12), 2)
+                cv2.imshow('Magic: The Gathering Card Detector', frame)
 
-    # Run the card detection and recognition.
-
-    card_detector.run_recognition()
-
-    if do_profile:
-        # Stop profiling and organize and print profiling results.
-        profiler.disable()
-        profiler.dump_stats('magic_card_detector.prof')
-        profiler_stream = io.StringIO()
-        sortby = pstats.SortKey.CUMULATIVE
-        profiler_stats = pstats.Stats(
-            profiler, stream=profiler_stream).sort_stats(sortby)
-        profiler_stats.print_stats(20)
-        print(profiler_stream.getvalue())
+            if cv2.waitKey(1) == ord('q'):
+                break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
